@@ -255,6 +255,8 @@ saveRESettings <- function(file) {
   validateIsFileExtension(file, "RData")
   newEnv <- reEnv
   save("newEnv", file = file)
+  # Prevent lintr warning by invisibly exporting names of RE settings
+  return(invisible(names(newEnv)))
 }
 
 #' @title loadRESettings
