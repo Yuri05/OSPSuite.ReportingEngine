@@ -323,6 +323,15 @@ messages <- list(
       "calculation uses extrapolation from the terminal 10% of simulated points."
     )
   },
+  
+  warningPKRatioWrongUnit = function(id, pkParameterName, sourceUnit) {
+    paste0(
+      "PK Parameter unit '", highlight(sourceUnit), 
+      "' for ID '", highlight(id), 
+      "' is not consistent with PK Parameter (", highlight(pkParameterName),
+      "). Use ospsuite::ospUnits to check available units."
+    )
+  },
 
   #----- Info messages ----
   runStarting = function(runName, subRun = NULL) {
