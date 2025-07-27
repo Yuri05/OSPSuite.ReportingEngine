@@ -9,7 +9,7 @@
 - Removed an unnecessary warning when the time offset is 0 (\#1289)
 - Fixed incorrect values in DDI ratio plots when the PK parameter is `AUC` and the end time is `Inf` (\#1342)
 - Fixed SD ranges not being displayed correctly in some comparison time profiles with time shift (\#1343)
-- Handle the **cowplot** update 
+- Updated compatibility with **cowplot** version 1.1.0 to fix alignment issues in multi-panel plots
 
 # ospsuite.reportingengine 2.2.0
 
