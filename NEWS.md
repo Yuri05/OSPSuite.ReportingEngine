@@ -1,8 +1,15 @@
-# ospsuite.reportingengine (development version)
+# ospsuite.reportingengine 2.3.11
 
 ## Minor improvements and bug fixes
 
-- Fixed an error where population workflow would break in R 4.5.0 due to an error in `trimFileName()` (\#1327)
+- Fixed an error in `trimFileName()` that caused the population workflow to break in R 4.5.0.  (\#1327)
+- Inconsistent exported image size fixed (\#1299)
+- Fixed typos in **qualification-workflow-template.R** (\#1334)
+- Fixed different axis font sizes when using two y-axes (\#1333)
+- Removed an unnecessary warning when the time offset is 0 (\#1289)
+- Fixed incorrect values in DDI ratio plots when the PK parameter is `AUC` and the end time is `Inf` (\#1342)
+- Fixed SD ranges not being displayed correctly in some comparison time profiles with time shift (\#1343)
+- Handle the **cowplot** update 
 
 # ospsuite.reportingengine 2.2.0
 
