@@ -2,7 +2,7 @@
 
 ## Minor improvements and bug fixes
 
-- Fixed an error in `trimFileName()` that caused the population workflow to break in R 4.5.0.  (\#1327)
+- Fixed an error in `trimFileName()` that caused the population workflow to break in R 4.5.0. (\#1327)
 - Inconsistent exported image size fixed (\#1299)
 - Fixed typos in **qualification-workflow-template.R** (\#1334)
 - Fixed different axis font sizes when using two y-axes (\#1333)
