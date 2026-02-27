@@ -8,59 +8,218 @@
 #' @import ospsuite.utils
 #' @keywords internal
 plotQualificationComparisonTimeProfile <- function(configurationPlan, settings) {
-  timeProfileResults <- list()
-  for (timeProfilePlan in configurationPlan$plots$ComparisonTimeProfilePlots) {
-    qualificationCatch(
-      {
-        # Create a unique ID for the plot name as <Plot index>-<Project>-<Simulation>
-        plotID <- defaultFileNames$resultID("comparison_time_profile", timeProfilePlan$Title, length(timeProfileResults) + 1)
+  # Pre-load all unique simulations and results to avoid redundant I/O
+  simulationCache <- preloadSimulationsForComparisonTimeProfile(configurationPlan)
+  observedDataCache <- preloadObservedDataForComparisonTimeProfile(configurationPlan)
 
-        # Get axes properties (with scale, limits and display units)
-        axesProperties <- getAxesProperties(timeProfilePlan$Axes) %||% settings$axes
-        if (isEmpty(axesProperties)) {
-          logError(messages$warningNoAxesSettings(
-            timeProfilePlan$Title,
-            plotType = "Comparison Time Profile Plots"
-          ))
-          next
-        }
+  # Determine if parallel processing should be used
+  timeProfilePlans <- configurationPlan$plots$ComparisonTimeProfilePlots
+  numberOfCores <- settings$numberOfCores %||% reEnv$defaultSimulationNumberOfCores
+  useParallel <- all(
+    requireNamespace("parallel", quietly = TRUE),
+    numberOfCores > 1,
+    length(timeProfilePlans) > 1
+  )
 
-        simulationDuration <- ospsuite::toUnit(
-          quantityOrDimension = "Time",
-          values = as.numeric(timeProfilePlan$SimulationDuration),
-          targetUnit = axesProperties$x$unit,
-          sourceUnit = timeProfilePlan$TimeUnit
-        )
-        axesProperties$x <- c(
-          axesProperties$x,
-          getTimeTicksFromUnit(axesProperties$x$unit, simulationDuration)
-        )
+  if (useParallel) {
+    # Parallel execution
+    cl <- parallel::makeCluster(numberOfCores)
+    on.exit(parallel::stopCluster(cl))
 
-        plotConfiguration <- getPlotConfigurationFromPlan(timeProfilePlan[["PlotSettings"]])
-        timeProfilePlot <- tlf::initializePlot(plotConfiguration)
-        for (outputMapping in timeProfilePlan$OutputMappings) {
-          timeProfilePlot <- addOutputToComparisonTimeProfile(
-            outputMapping,
-            simulationDuration,
-            axesProperties,
-            timeProfilePlot,
-            configurationPlan
-          )
-        }
-        # Set axes based on Axes properties
-        timeProfilePlot <- updatePlotAxes(timeProfilePlot, axesProperties)
-        # Save results
-        timeProfileResults[[plotID]] <- saveTaskResults(
-          id = plotID,
-          sectionId = timeProfilePlan$SectionReference %||% timeProfilePlan$SectionId,
-          plot = timeProfilePlot,
-          plotCaption = timeProfilePlan$Title
+    # Export necessary objects to cluster
+    parallel::clusterExport(cl, c(
+      "simulationCache",
+      "observedDataCache",
+      "configurationPlan",
+      "settings"
+    ), envir = environment())
+
+    # Export necessary functions to cluster
+    parallel::clusterEvalQ(cl, {
+      library(ospsuite)
+      library(ospsuite.utils)
+      library(tlf)
+      library(ospsuite.reportingengine)
+    })
+
+    timeProfileResultsList <- parallel::parLapply(
+      cl = cl,
+      seq_along(timeProfilePlans),
+      function(i) {
+        processTimeProfilePlan(
+          timeProfilePlan = timeProfilePlans[[i]],
+          plotIndex = i,
+          simulationCache = simulationCache,
+          observedDataCache = observedDataCache,
+          configurationPlan = configurationPlan,
+          settings = settings
         )
-      },
-      configurationPlanField = timeProfilePlan
+      }
+    )
+  } else {
+    # Sequential execution
+    timeProfileResultsList <- lapply(
+      seq_along(timeProfilePlans),
+      function(i) {
+        processTimeProfilePlan(
+          timeProfilePlan = timeProfilePlans[[i]],
+          plotIndex = i,
+          simulationCache = simulationCache,
+          observedDataCache = observedDataCache,
+          configurationPlan = configurationPlan,
+          settings = settings
+        )
+      }
     )
   }
+
+  # Convert list to named list and remove NULL entries
+  timeProfileResults <- list()
+  for (result in timeProfileResultsList) {
+    if (!is.null(result)) {
+      timeProfileResults[[result$id]] <- result$data
+    }
+  }
+
   return(timeProfileResults)
+}
+
+#' @title processTimeProfilePlan
+#' @description Process a single time profile plan (extracted for parallelization)
+#' @param timeProfilePlan A time profile plan from configuration
+#' @param plotIndex Index of the plot
+#' @param simulationCache Pre-loaded simulations cache
+#' @param observedDataCache Pre-loaded observed data cache
+#' @param configurationPlan A `ConfigurationPlan` object
+#' @param settings Settings object
+#' @return A list with id and data, or NULL on error
+#' @keywords internal
+processTimeProfilePlan <- function(timeProfilePlan, plotIndex, simulationCache, observedDataCache, configurationPlan, settings) {
+  result <- qualificationCatch(
+    {
+      # Create a unique ID for the plot name as <Plot index>-<Project>-<Simulation>
+      plotID <- defaultFileNames$resultID("comparison_time_profile", timeProfilePlan$Title, plotIndex)
+
+      # Get axes properties (with scale, limits and display units)
+      axesProperties <- getAxesProperties(timeProfilePlan$Axes) %||% settings$axes
+      if (isEmpty(axesProperties)) {
+        logError(messages$warningNoAxesSettings(
+          timeProfilePlan$Title,
+          plotType = "Comparison Time Profile Plots"
+        ))
+        return(NULL)
+      }
+
+      simulationDuration <- ospsuite::toUnit(
+        quantityOrDimension = "Time",
+        values = as.numeric(timeProfilePlan$SimulationDuration),
+        targetUnit = axesProperties$x$unit,
+        sourceUnit = timeProfilePlan$TimeUnit
+      )
+      axesProperties$x <- c(
+        axesProperties$x,
+        getTimeTicksFromUnit(axesProperties$x$unit, simulationDuration)
+      )
+
+      plotConfiguration <- getPlotConfigurationFromPlan(timeProfilePlan[["PlotSettings"]])
+      timeProfilePlot <- tlf::initializePlot(plotConfiguration)
+      for (outputMapping in timeProfilePlan$OutputMappings) {
+        timeProfilePlot <- addOutputToComparisonTimeProfile(
+          outputMapping,
+          simulationDuration,
+          axesProperties,
+          timeProfilePlot,
+          configurationPlan,
+          simulationCache,
+          observedDataCache
+        )
+      }
+      # Set axes based on Axes properties
+      timeProfilePlot <- updatePlotAxes(timeProfilePlot, axesProperties)
+      # Save results
+      taskResult <- saveTaskResults(
+        id = plotID,
+        sectionId = timeProfilePlan$SectionReference %||% timeProfilePlan$SectionId,
+        plot = timeProfilePlot,
+        plotCaption = timeProfilePlan$Title
+      )
+
+      return(list(id = plotID, data = taskResult))
+    },
+    configurationPlanField = timeProfilePlan
+  )
+
+  return(result)
+}
+
+#' @title preloadSimulationsForComparisonTimeProfile
+#' @description Pre-load all unique simulations and results to avoid redundant I/O
+#' @param configurationPlan A `ConfigurationPlan` object
+#' @return A list with simulation and results data
+#' @keywords internal
+preloadSimulationsForComparisonTimeProfile <- function(configurationPlan) {
+  simulationCache <- list()
+
+  # Collect all unique simulation keys
+  uniqueSimKeys <- list()
+  for (timeProfilePlan in configurationPlan$plots$ComparisonTimeProfilePlots) {
+    for (outputMapping in timeProfilePlan$OutputMappings) {
+      simKey <- paste(outputMapping$Project, outputMapping$Simulation, sep = "::")
+      uniqueSimKeys[[simKey]] <- list(
+        project = outputMapping$Project,
+        simulation = outputMapping$Simulation
+      )
+    }
+  }
+
+  # Pre-load all unique simulations
+  for (simKey in names(uniqueSimKeys)) {
+    simInfo <- uniqueSimKeys[[simKey]]
+    simulationFile <- configurationPlan$getSimulationPath(
+      project = simInfo$project,
+      simulation = simInfo$simulation
+    )
+    simulationResultsFile <- configurationPlan$getSimulationResultsPath(
+      project = simInfo$project,
+      simulation = simInfo$simulation
+    )
+
+    simulation <- ospsuite::loadSimulation(simulationFile, loadFromCache = TRUE)
+    simulationResults <- ospsuite::importResultsFromCSV(simulation, simulationResultsFile)
+
+    simulationCache[[simKey]] <- list(
+      simulation = simulation,
+      results = simulationResults
+    )
+  }
+
+  return(simulationCache)
+}
+
+#' @title preloadObservedDataForComparisonTimeProfile
+#' @description Pre-load all observed data to avoid redundant lookups
+#' @param configurationPlan A `ConfigurationPlan` object
+#' @return A list with observed data
+#' @keywords internal
+preloadObservedDataForComparisonTimeProfile <- function(configurationPlan) {
+  observedDataCache <- list()
+
+  # Collect all unique observed data IDs
+  uniqueObsDataIds <- character(0)
+  for (timeProfilePlan in configurationPlan$plots$ComparisonTimeProfilePlots) {
+    for (outputMapping in timeProfilePlan$OutputMappings) {
+      if (!is.null(outputMapping$ObservedData)) {
+        uniqueObsDataIds <- unique(c(uniqueObsDataIds, outputMapping$ObservedData))
+      }
+    }
+  }
+
+  # Pre-load all unique observed data
+  for (obsDataId in uniqueObsDataIds) {
+    observedDataCache[[obsDataId]] <- getObservedDataFromConfigurationPlan(obsDataId, configurationPlan)
+  }
+
+  return(observedDataCache)
 }
 
 #' @title addOutputToComparisonTimeProfile
@@ -70,21 +229,29 @@ plotQualificationComparisonTimeProfile <- function(configurationPlan, settings) 
 #' @param axesProperties list of axes properties obtained from `getAxesProperties`
 #' @param plotObject ggplot object
 #' @param configurationPlan A `ConfigurationPlan` object
+#' @param simulationCache Pre-loaded simulations cache (optional)
+#' @param observedDataCache Pre-loaded observed data cache (optional)
 #' @return A ggplot object
 #' @import ospsuite.utils
 #' @keywords internal
-addOutputToComparisonTimeProfile <- function(outputMapping, simulationDuration, axesProperties, plotObject, configurationPlan) {
-  # Get simulation output
-  simulationFile <- configurationPlan$getSimulationPath(
-    project = outputMapping$Project,
-    simulation = outputMapping$Simulation
-  )
-  simulationResultsFile <- configurationPlan$getSimulationResultsPath(
-    project = outputMapping$Project,
-    simulation = outputMapping$Simulation
-  )
-  simulation <- ospsuite::loadSimulation(simulationFile, loadFromCache = TRUE)
-  simulationResults <- ospsuite::importResultsFromCSV(simulation, simulationResultsFile)
+addOutputToComparisonTimeProfile <- function(outputMapping, simulationDuration, axesProperties, plotObject, configurationPlan, simulationCache = NULL, observedDataCache = NULL) {
+  # Get simulation output from cache or load it
+  simKey <- paste(outputMapping$Project, outputMapping$Simulation, sep = "::")
+  if (!is.null(simulationCache) && !is.null(simulationCache[[simKey]])) {
+    simulation <- simulationCache[[simKey]]$simulation
+    simulationResults <- simulationCache[[simKey]]$results
+  } else {
+    simulationFile <- configurationPlan$getSimulationPath(
+      project = outputMapping$Project,
+      simulation = outputMapping$Simulation
+    )
+    simulationResultsFile <- configurationPlan$getSimulationResultsPath(
+      project = outputMapping$Project,
+      simulation = outputMapping$Simulation
+    )
+    simulation <- ospsuite::loadSimulation(simulationFile, loadFromCache = TRUE)
+    simulationResults <- ospsuite::importResultsFromCSV(simulation, simulationResultsFile)
+  }
   # Get and convert output path values into display unit
   simulationQuantity <- ospsuite::getQuantity(outputMapping$Output, simulation)
   simulationPathResults <- ospsuite::getOutputValues(simulationResults, quantitiesOrPaths = simulationQuantity)
@@ -146,8 +313,12 @@ addOutputToComparisonTimeProfile <- function(outputMapping, simulationDuration, 
 
   # Loop on each observed dataset in OutputMappings
   for (observedDataSet in outputMapping$ObservedData) {
-    # Get data and meta data of observed results
-    observedResults <- getObservedDataFromConfigurationPlan(observedDataSet, configurationPlan)
+    # Get data and meta data of observed results from cache or load it
+    if (!is.null(observedDataCache) && !is.null(observedDataCache[[observedDataSet]])) {
+      observedResults <- observedDataCache[[observedDataSet]]
+    } else {
+      observedResults <- getObservedDataFromConfigurationPlan(observedDataSet, configurationPlan)
+    }
     observedTime <- ospsuite::toUnit(
       quantityOrDimension = "Time",
       values = as.numeric(observedResults$data[, 1]),
