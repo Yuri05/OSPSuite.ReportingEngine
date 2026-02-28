@@ -41,17 +41,17 @@ Imports:
     rSharp (>= 1.0.0),
     dplyr,
     tidyr,
-    cowplot
+    cowplot,
+    knitr,
+    parallel
 Suggests: 
     testthat (>= 2.1.0),
-    knitr,
     rmarkdown,
     devtools (>= 2.4.5),
     readxl,
     styler,
     crayon,
     webshot2,
-    parallel,
     devtools,
     chromote,
     webshot
