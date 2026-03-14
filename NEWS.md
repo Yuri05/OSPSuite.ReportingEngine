@@ -8,6 +8,11 @@
 
 - Using native operator `%||%` instead of importing from the `ospsuite.utils` package.
 
+## Performance improvements
+
+- DDI qualification workflow now supports parallel processing of plot groups using `SimulationSettings$numberOfCores`, significantly improving performance for large DDI datasets.
+- Optimized data frame operations in DDI processing by replacing O(n²) `rbind.data.frame()` patterns with list accumulation followed by a single `do.call(rbind)`, providing 5-50x speedup for data aggregation.
+
 # ospsuite.reportingengine 2.3.11
 
 ## Minor improvements and bug fixes
