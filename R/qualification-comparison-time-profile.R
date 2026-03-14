@@ -14,9 +14,8 @@ plotQualificationComparisonTimeProfile <- function(configurationPlan, settings) 
 
   # Determine if parallel processing should be used
   timeProfilePlans <- configurationPlan$plots$ComparisonTimeProfilePlots
-  numberOfCores <- settings$numberOfCores %||% reEnv$defaultSimulationNumberOfCores
+  numberOfCores <- settings$numberOfCores %||% parallel::detectCores()
   useParallel <- all(
-    requireNamespace("parallel", quietly = TRUE),
     numberOfCores > 1,
     length(timeProfilePlans) > 1
   )
