@@ -1,15 +1,18 @@
 #' @title getQualificationDDIPlotData
 #' @description Build dataframes and metadata for each DDI plot
 #' @param configurationPlan The configuration plan of a Qualification workflow read from json file.
+#' @param settings A `TaskSettings` object containing parallelization settings
 #' @return  plotDDIdata, a list of lists of the form list(dataframe,metadata) specific to each DID plot
 #' @import ospsuite.utils
 #' @keywords internal
-getQualificationDDIPlotData <- function(configurationPlan) {
+getQualificationDDIPlotData <- function(configurationPlan, settings = NULL) {
+  # Use default settings if not provided
+  settings <- settings %||% SimulationSettings$new()
+
   plotDDIdata <- list()
   for (plotNumber in seq_along(configurationPlan$plots$DDIRatioPlots)) {
     qualificationCatch(
       {
-        plotDDIDataFrame <- NULL
         plotDDIMetadata <- list()
         plot <- configurationPlan$plots$DDIRatioPlots[[plotNumber]]
 
@@ -38,95 +41,72 @@ getQualificationDDIPlotData <- function(configurationPlan) {
         validateIsIncluded(values = pkParameters, parentValues = names(ddiPKRatioColumnName), nullAllowed = FALSE)
 
         defaultProperties <- getDefaultPropertiesFromTheme("plotDDIRatio", propertyType = "points")
-        for (groupNumber in seq_along(plot$Groups)) {
-          group <- plot$Groups[[groupNumber]]
-          plotDDIMetadata$groups[[groupNumber]] <- list()
-          plotDDIMetadata$groups[[groupNumber]]$caption <- group$Caption
-          plotDDIMetadata$groups[[groupNumber]]$color <- group$Color %||% defaultProperties$color
-          plotDDIMetadata$groups[[groupNumber]]$symbol <- tlfShape(group$Symbol %||% defaultProperties$shape)
 
-          for (ddiRatio in group$DDIRatios) {
-            outputPath <- ddiRatio$Output
-            observedDataSet <- ddiRatio$ObservedData
-            observedDataSetFilePath <- configurationPlan$getObservedDataPath(id = observedDataSet)
-            observedDataRecordId <- ddiRatio$ObservedDataRecordId
-            observedDataFrame <- readObservedDataFile(fileName = observedDataSetFilePath)
-            validateIsIncluded(observedDataRecordId, observedDataFrame$ID)
+        # Process groups in parallel if settings allow
+        useParallel <- all(
+          requireNamespace("parallel", quietly = TRUE),
+          settings$numberOfCores > 1,
+          length(plot$Groups) > 1
+        )
 
-            ratioList <- list()
-            for (pkParameter in pkParameters) {
-              ratioList[[pkParameter]] <- list()
-              validateIsIncluded(ddiPKRatioColumnName[[pkParameter]], names(observedDataFrame))
+        if (useParallel) {
+          cl <- parallel::makeCluster(settings$numberOfCores)
+          on.exit(parallel::stopCluster(cl))
 
-              # The following tryCatch verifies that the PK parameter columns are read as `numeric` by the call to `readObservedDataFile` above.
-              # The function `readObservedDataFile` first attempts to read csv files using `read.csv`.
-              # If this fails, because, for example the CSV file is semicolon separated, `readObservedDataFile` attempts to read the file using `read.csv2`.
-              # If a semicolon-separated CSV contains a float column with period `.` decimal separators (and not comma ',' decimal separators) then read.csv2 will read this column as `factor`.
-              # Therefore, coerce this column into `numeric` format:
-              observedDataFrame[[ddiPKRatioColumnName[[pkParameter]]]] <- as.numeric(observedDataFrame[[ddiPKRatioColumnName[[pkParameter]]]])
+          # Export required objects to cluster
+          parallel::clusterExport(cl, c(
+            "plot",
+            "pkParameters",
+            "defaultProperties",
+            "configurationPlan"
+          ), envir = environment())
 
-              observedDataSelection <- observedDataFrame$ID %in% observedDataRecordId
-              ratioList[[pkParameter]] <- getDDIRatioList(observedDataFrame[observedDataSelection, ], ddiPKRatioColumnName[[pkParameter]])
-              for (simulationType in c("SimulationControl", "SimulationDDI")) {
-                plotComponent <- ddiRatio[[simulationType]]
-                projectName <- plotComponent$Project
-                simulationName <- plotComponent$Simulation
+          # Load required packages and functions on each worker
+          parallel::clusterEvalQ(cl, {
+            library(ospsuite)
+            library(ospsuite.utils)
+            library(ospsuite.reportingengine)
+          })
 
-                startTime <- getTimeFromPlan(plotComponent, "StartTime")
-                endTime <- getTimeFromPlan(plotComponent, "EndTime")
-                useAUCinf <- all(isEmpty(endTime), isIncluded(pkParameter, "AUC"))
-                pkParameterName <- generateDDIPlotPKParameterName(
-                  ifelse(useAUCinf, "AUC_inf", pkParameter),
-                  startTime,
-                  endTime
-                )
-
-                pkAnalysisResultsPath <- configurationPlan$getPKAnalysisResultsPath(
-                  project = projectName,
-                  simulation = simulationName
-                )
-
-                simulationFile <- configurationPlan$getSimulationPath(
-                  project = projectName,
-                  simulation = simulationName
-                )
-
-                simulation <- ospsuite::loadSimulation(simulationFile, loadFromCache = TRUE)
-                pkAnalysisResults <- loadPKAnalysesFromCSV(
-                  filePath = pkAnalysisResultsPath,
-                  simulation = simulation
-                )
-
-                ratioList[[pkParameter]][[simulationType]] <- pkAnalysisResults$pKParameterFor(
-                  quantityPath = outputPath,
-                  pkParameter = pkParameterName
-                )$values
-              }
-
-              df <- data.frame(
-                project = projectName,
-                simulation = simulationName,
+          # Process groups in parallel
+          groupResults <- parallel::parLapply(
+            cl = cl,
+            seq_along(plot$Groups),
+            function(groupNumber) {
+              # Use the triple-colon to access internal function
+              ospsuite.reportingengine:::processDDIGroup(
                 groupNumber = groupNumber,
-                outputPath = outputPath,
-                pkParameter = pkParameter,
-                pkParameterName = pkParameterName,
-                observedRatio = ratioList[[pkParameter]]$observedRatio,
-                simulatedRatio = ratioList[[pkParameter]][["SimulationDDI"]] / ratioList[[pkParameter]][["SimulationControl"]],
-                id = ratioList[[pkParameter]]$id,
-                studyId = ratioList[[pkParameter]]$studyId,
-                mechanism = getMechanismName(ratioList[[pkParameter]]$mechanism),
-                perpetrator = ratioList[[pkParameter]]$perpetrator %||% NA,
-                routePerpetrator = ratioList[[pkParameter]]$routePerpetrator %||% NA,
-                victim = ratioList[[pkParameter]]$victim %||% NA,
-                routeVictim = ratioList[[pkParameter]]$routeVictim %||% NA,
-                dose = ratioList[[pkParameter]]$dose,
-                doseUnit = ratioList[[pkParameter]]$doseUnit,
-                description = ratioList[[pkParameter]]$description %||% NA
+                group = plot$Groups[[groupNumber]],
+                plot = plot,
+                pkParameters = pkParameters,
+                defaultProperties = defaultProperties,
+                configurationPlan = configurationPlan
               )
-
-              plotDDIDataFrame <- rbind.data.frame(plotDDIDataFrame, df)
             }
+          )
+
+          # Extract metadata and dataframes from results
+          plotDDIMetadata$groups <- lapply(groupResults, function(x) x$metadata)
+          # Combine dataframes efficiently using do.call
+          plotDDIDataFrame <- do.call(rbind, lapply(groupResults, function(x) x$dataframe))
+        } else {
+          # Sequential processing (original logic)
+          groupResultsList <- list()
+          for (groupNumber in seq_along(plot$Groups)) {
+            group <- plot$Groups[[groupNumber]]
+            groupResult <- processDDIGroup(
+              groupNumber = groupNumber,
+              group = group,
+              plot = plot,
+              pkParameters = pkParameters,
+              defaultProperties = defaultProperties,
+              configurationPlan = configurationPlan
+            )
+            plotDDIMetadata$groups[[groupNumber]] <- groupResult$metadata
+            groupResultsList[[groupNumber]] <- groupResult$dataframe
           }
+          # Combine dataframes efficiently using do.call
+          plotDDIDataFrame <- do.call(rbind, groupResultsList)
         }
 
         plotDDIdata[[plotNumber]] <- list(
@@ -138,6 +118,117 @@ getQualificationDDIPlotData <- function(configurationPlan) {
     )
   }
   return(plotDDIdata)
+}
+
+#' @title processDDIGroup
+#' @description Process a single DDI group (extracted for parallelization)
+#' @param groupNumber Index of the current group
+#' @param group The group object from plot$Groups
+#' @param plot The plot object
+#' @param pkParameters PK parameters to process
+#' @param defaultProperties Default properties for the plot
+#' @param configurationPlan The configuration plan
+#' @return A list with metadata and dataframe for the group
+#' @keywords internal
+processDDIGroup <- function(groupNumber, group, plot, pkParameters, defaultProperties, configurationPlan) {
+  groupMetadata <- list()
+  groupMetadata$caption <- group$Caption
+  groupMetadata$color <- group$Color %||% defaultProperties$color
+  groupMetadata$symbol <- tlfShape(group$Symbol %||% defaultProperties$shape)
+
+  # Use list accumulation instead of repeated rbind for better performance
+  dataFrameList <- list()
+  dfIndex <- 1
+
+  for (ddiRatio in group$DDIRatios) {
+    outputPath <- ddiRatio$Output
+    observedDataSet <- ddiRatio$ObservedData
+    observedDataSetFilePath <- configurationPlan$getObservedDataPath(id = observedDataSet)
+    observedDataRecordId <- ddiRatio$ObservedDataRecordId
+    observedDataFrame <- readObservedDataFile(fileName = observedDataSetFilePath)
+    validateIsIncluded(observedDataRecordId, observedDataFrame$ID)
+
+    ratioList <- list()
+    for (pkParameter in pkParameters) {
+      ratioList[[pkParameter]] <- list()
+      validateIsIncluded(ddiPKRatioColumnName[[pkParameter]], names(observedDataFrame))
+
+      # The following tryCatch verifies that the PK parameter columns are read as `numeric` by the call to `readObservedDataFile` above.
+      # The function `readObservedDataFile` first attempts to read csv files using `read.csv`.
+      # If this fails, because, for example the CSV file is semicolon separated, `readObservedDataFile` attempts to read the file using `read.csv2`.
+      # If a semicolon-separated CSV contains a float column with period `.` decimal separators (and not comma ',' decimal separators) then read.csv2 will read this column as `factor`.
+      # Therefore, coerce this column into `numeric` format:
+      observedDataFrame[[ddiPKRatioColumnName[[pkParameter]]]] <- as.numeric(observedDataFrame[[ddiPKRatioColumnName[[pkParameter]]]])
+
+      observedDataSelection <- observedDataFrame$ID %in% observedDataRecordId
+      ratioList[[pkParameter]] <- getDDIRatioList(observedDataFrame[observedDataSelection, ], ddiPKRatioColumnName[[pkParameter]])
+      for (simulationType in c("SimulationControl", "SimulationDDI")) {
+        plotComponent <- ddiRatio[[simulationType]]
+        projectName <- plotComponent$Project
+        simulationName <- plotComponent$Simulation
+
+        startTime <- getTimeFromPlan(plotComponent, "StartTime")
+        endTime <- getTimeFromPlan(plotComponent, "EndTime")
+        useAUCinf <- all(isEmpty(endTime), isIncluded(pkParameter, "AUC"))
+        pkParameterName <- generateDDIPlotPKParameterName(
+          ifelse(useAUCinf, "AUC_inf", pkParameter),
+          startTime,
+          endTime
+        )
+
+        pkAnalysisResultsPath <- configurationPlan$getPKAnalysisResultsPath(
+          project = projectName,
+          simulation = simulationName
+        )
+
+        simulationFile <- configurationPlan$getSimulationPath(
+          project = projectName,
+          simulation = simulationName
+        )
+
+        simulation <- ospsuite::loadSimulation(simulationFile, loadFromCache = TRUE)
+        pkAnalysisResults <- loadPKAnalysesFromCSV(
+          filePath = pkAnalysisResultsPath,
+          simulation = simulation
+        )
+
+        ratioList[[pkParameter]][[simulationType]] <- pkAnalysisResults$pKParameterFor(
+          quantityPath = outputPath,
+          pkParameter = pkParameterName
+        )$values
+      }
+
+      df <- data.frame(
+        project = projectName,
+        simulation = simulationName,
+        groupNumber = groupNumber,
+        outputPath = outputPath,
+        pkParameter = pkParameter,
+        pkParameterName = pkParameterName,
+        observedRatio = ratioList[[pkParameter]]$observedRatio,
+        simulatedRatio = ratioList[[pkParameter]][["SimulationDDI"]] / ratioList[[pkParameter]][["SimulationControl"]],
+        id = ratioList[[pkParameter]]$id,
+        studyId = ratioList[[pkParameter]]$studyId,
+        mechanism = getMechanismName(ratioList[[pkParameter]]$mechanism),
+        perpetrator = ratioList[[pkParameter]]$perpetrator %||% NA,
+        routePerpetrator = ratioList[[pkParameter]]$routePerpetrator %||% NA,
+        victim = ratioList[[pkParameter]]$victim %||% NA,
+        routeVictim = ratioList[[pkParameter]]$routeVictim %||% NA,
+        dose = ratioList[[pkParameter]]$dose,
+        doseUnit = ratioList[[pkParameter]]$doseUnit,
+        description = ratioList[[pkParameter]]$description %||% NA
+      )
+
+      # Accumulate in list instead of repeated rbind
+      dataFrameList[[dfIndex]] <- df
+      dfIndex <- dfIndex + 1
+    }
+  }
+
+  # Combine all dataframes at once for better performance
+  groupDataFrame <- do.call(rbind, dataFrameList)
+
+  return(list(metadata = groupMetadata, dataframe = groupDataFrame))
 }
 
 #' @title getMechanismName
@@ -519,7 +610,7 @@ getDDITable <- function(dataframe) {
 #' @return list of qualification DDI ggplot objects
 #' @keywords internal
 plotQualificationDDIs <- function(configurationPlan, settings) {
-  ddiData <- getQualificationDDIPlotData(configurationPlan)
+  ddiData <- getQualificationDDIPlotData(configurationPlan, settings)
 
   ddiResults <- list()
   for (plotIndex in seq_along(ddiData)) {
