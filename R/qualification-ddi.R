@@ -5,9 +5,7 @@
 #' @return  plotDDIdata, a list of lists of the form list(dataframe,metadata) specific to each DID plot
 #' @import ospsuite.utils
 #' @keywords internal
-getQualificationDDIPlotData <- function(configurationPlan, settings = NULL) {
-  # Use default settings if not provided
-  settings <- settings %||% SimulationSettings$new()
+getQualificationDDIPlotData <- function(configurationPlan, settings) {
 
   plotDDIdata <- list()
   for (plotNumber in seq_along(configurationPlan$plots$DDIRatioPlots)) {
@@ -43,14 +41,14 @@ getQualificationDDIPlotData <- function(configurationPlan, settings = NULL) {
         defaultProperties <- getDefaultPropertiesFromTheme("plotDDIRatio", propertyType = "points")
 
         # Process groups in parallel if settings allow
+        numberOfCores <- settings$numberOfCores %||% parallel::detectCores()
         useParallel <- all(
-          requireNamespace("parallel", quietly = TRUE),
           settings$numberOfCores > 1,
           length(plot$Groups) > 1
         )
 
         if (useParallel) {
-          cl <- parallel::makeCluster(settings$numberOfCores)
+          cl <- parallel::makeCluster(numberOfCores)
           on.exit(parallel::stopCluster(cl))
 
           # Export required objects to cluster
